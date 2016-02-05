@@ -72,7 +72,7 @@ int main(void)
 	OUTPUT(LED);
 	OUTPUT(OUT1);
 	OUTPUT(AUX_OUT);
-	LOW(OUT1);
+	HIGH(OUT1);
 
 	//Setup inputs
 	INPUT(ZERO_IN);
@@ -85,8 +85,6 @@ int main(void)
 
 	MCUCR |= _BV(ISC01);     //INT0 in Falling edge
 
-
-	//startTimer1();
 	char oldState = READ(PUSH_IN);
 	while(1){
 		HIGH(LED);
@@ -113,8 +111,7 @@ int main(void)
 ISR(INT0_vect)
 {
 	char tmp;
-	for(tmp=0; tmp<10;){
-		_delay_us(10);
+	for(tmp=0; tmp<5;){
 		if(!READ(ZERO_IN)){
 			tmp++;
 		}
@@ -122,35 +119,36 @@ ISR(INT0_vect)
 			tmp = INVALID;
 		}
 	}
-	if(tmp != INVALID){
-		HIGH(AUX_OUT);
+	if(tmp==INVALID)
+		return;
 
-		if(state==State_Calibration){
-			if(zc_cycles>75 && zc_cycles<110){
-				state = State_Calibrated;
-				zc_interval = (zc_cycles>>1);
-				zc_cycles = 0;
-				TCNT0 = 0;
-			}
-			else{
-				state = State_Uncalibrated;
-				stopTimer1();
-			}
+	HIGH(AUX_OUT);
+	if(state==State_Calibration){
+		if(zc_cycles>75 && zc_cycles<110){
+			state = State_Calibrated;
+			zc_interval = (zc_cycles>>1);
+			zc_cycles = 0;
+			TCNT0 = 0;
 		}
-		else if(state==State_Calibrated){
-			fire_triac = 6;
+		else{
+			state = State_Uncalibrated;
+			stopTimer1();
+		}
+	}
+	else if(state==State_Calibrated){
+		if(zc_cycles>zc_interval){//Ignore possible oscilations
+			fire_triac = 5;
 			zc_cycles = 0;
 			TCNT0 = 0;
 			TIFR0|= _BV(OCF0A);
 		}
-		else{
-			zc_interval = INVALID;
-			zc_cycles = 0;
-			state = State_Calibration;
-			startTimer1();
-		}
 	}
-
+	else{
+		zc_interval = INVALID;
+		zc_cycles = 0;
+		state = State_Calibration;
+		startTimer1();
+	}
 }
 
 ISR(TIM0_COMPA_vect) {
@@ -176,7 +174,7 @@ ISR(TIM0_COMPA_vect) {
 	}
 	else{
 		stopTimer1();
-		LOW(OUT1);
+		HIGH(OUT1);
 	}
 
 }
