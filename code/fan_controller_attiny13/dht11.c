@@ -3,6 +3,7 @@
  *
  *
  * Copyright (c) 2012, Angus Gratton. Licensed under the Modified BSD License.
+ *
  */
 #include "config.h"
 #include "macro_helpers.h"
@@ -17,11 +18,17 @@
 #error You should define a pin named DHT_PIN in config.h, with form D,2
 #endif
 
+#define clockCyclesPerMicrosecond() ( F_CPU / 1000000L )
+#define clockCyclesToMicroseconds(a) ( (a) / clockCyclesPerMicrosecond() )
+#define microsecondsToClockCycles(a) ( (a) * clockCyclesPerMicrosecond() )
+
+//static const uint8_t MAX_WAIT = microsecondsToClockCycles(100);
+#define MAX_WAIT microsecondsToClockCycles(100)
+
 void init_dht11() {
   INPUT(DHT_PIN);
   // use internal 20k pullup (lazy!)
   HIGH(DHT_PIN);
-
 }
 
 union _dht_output {
@@ -32,51 +39,83 @@ union _dht_output {
   } data;
 };
 
-/* Wait for a DHT signal edge, high or low. Edge must be at least min_length us and no longer than max_length us.
- *
- * Returns the edge duration, or 0 if the edge was outside of limits (too long or too short)
- */
-static uint8_t listen_edge(bool high, uint8_t min_length, uint8_t max_length)
-{
-  uint8_t wait_time;
-  for(wait_time = 0; wait_time < max_length && (READ(DHT_PIN) == high); wait_time++)
-    _delay_us(1);
-  if(wait_time == max_length || wait_time < min_length)
-    return 0; // bad edge
-  return wait_time;
+
+static int8_t read_preamble(void) {
+	/*
+	 * The DHT11 generates a preamble/ACK where the line is pulled down for 80us and pulled up for 80us
+	 */
+	uint16_t wait_time = 0;
+	while(READ(DHT_PIN)){
+	  if(wait_time++ == MAX_WAIT)
+		  return -1; // bad edge
+	}
+	wait_time=0;
+	while(!READ(DHT_PIN)){
+	  if(wait_time++ == MAX_WAIT)
+		  return -1; // bad edge
+	}
+	wait_time=0;
+	while(READ(DHT_PIN)){
+	  if(wait_time++ == MAX_WAIT)
+		  return -1; // bad edge
+	}
+	return 0;
 }
 
-dht11_status read_dht11(dht11_data *data) {
+static int8_t read_bit(void) {
+	/*
+	 * A data bit starts with a 50us delay, where the data line is pulled down, followed
+	 * by a pulse high where the duration is used to distinguish a zero from a one.
+	 * A pulse with 26-28us is a zero and a pulse with 70us is a one.
+	 * We measure the duration of the initial delay and the duration of the pulse and use
+	 * the duration of the delay as a reference to distinguish the a zero from a one.
+	 *
+	 */
+	uint16_t bit_time = 0;
+	uint16_t bitstart_delay = 0;
+  while(!READ(DHT_PIN)){
+	  if(bitstart_delay++ == MAX_WAIT)
+		  return -1; // bad edge
+  }
+  while(READ(DHT_PIN)){
+  	  if(bit_time++ == MAX_WAIT)
+  		  return -1; // bad edge
+    }
+
+  return bit_time>bitstart_delay;
+}
+
+int8_t read_humidity(void)
+{
   OUTPUT(DHT_PIN);
+  /*
+   * Send a DHT wakeup/start signal.
+   * This signal is made of a low pulse with a minimum duration of 18ms.
+   * After 40us the DHT sends an preamble/ACK by pulling the line low.
+   */
   LOW(DHT_PIN); // send DHT wakeup signal
   _delay_ms(18);
   HIGH(DHT_PIN);
   _delay_us(40);
   INPUT(DHT_PIN);
 
-  if(!listen_edge(false, 0, 100)) // hold for DHT ack signal, 80us
-    return bad_ack;
-
-  _delay_us(5);
-  if(!listen_edge(true, 0, 100)) // pre-transmission pause from DHT
-    return bad_post_ack;
+  if(read_preamble()<0)
+	  return bad_ack;
 
   union _dht_output raw = { .bytes={0} };
   for(uint8_t byte = 0; byte < sizeof(raw); byte++) {
-    for(int8_t bit = 7; bit >= 0; bit--) {
-      if(!listen_edge(false, 20, 80)) // 50us bit prelude
-        return bad_bit_prelude;
-      uint8_t bit_length = listen_edge(true, 10, 90); // bit signal - 26-28us for 0 70us for 1
-      if(!bit_length)
-        return bad_bit_data_pause; // invalid data pulse
-      if(bit_length > 30)
-        raw.bytes[byte] |= _BV(bit);
-    }
+	for(int8_t bit = 7; bit >= 0; bit--) {
+		int8_t b =read_bit();
+		if(b<0){
+			return bad_bit_data_pause; // invalid data pulse
+		}
+		if(b){
+			raw.bytes[byte] |= _BV(bit);
+		}
+	}
   }
 
   if(raw.data.checksum != (uint8_t)(raw.bytes[0]+raw.bytes[1]+raw.bytes[2]+raw.bytes[3]))
-    return bad_checksum;
-
-  memcpy(data, &raw.data.inner, sizeof(dht11_data));
-  return success;
+	return bad_checksum;
+  return raw.data.inner.humidity_integral;
 }

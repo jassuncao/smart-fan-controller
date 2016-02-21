@@ -8,6 +8,6 @@
 #ifndef CONFIG_H_
 #define CONFIG_H_
 
-#define DHT_PIN B,3 // arduino pin 11
+#define DHT_PIN B,3
 
 #endif /* CONFIG_H_ */

@@ -25,6 +25,6 @@ enum dht11_status {
 typedef enum dht11_status dht11_status;
 
 void init_dht11();
-dht11_status read_dht11(dht11_data *data);
+int8_t read_humidity(void);
 
 #endif
