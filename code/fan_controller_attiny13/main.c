@@ -15,25 +15,29 @@
 
 #define OUT1 B,0
 #define ZERO_IN B,1
-#define PUSH_IN B,2
+//#define PUSH_IN B,2
 //#define DHT_PIN B,3
 #define LED B,4
 
 //#define AUX_OUT B,4
 
-//Assumes that timer1 ISR is called every 0.0002
-#define ONE_SECOND 5000
-static uint16_t subsecs_counter = 0;
+//The mains frequency
+#define ONE_SECOND 50
+//Incremented in zero crossing
+static uint8_t subsec_counter = 0;
+//Incremented every second
 static volatile uint8_t secs_counter = 0;
 
+static volatile uint8_t turn_on_flag = 0;
+
 void timer1_init(){
-	cli();
+	//cli();
 	TCCR0B = 0;
 	TCNT0  = 0;					// Initialize counter value to 0
 	TCCR0A = _BV(WGM01); 		// Turn on CTC mode
 	OCR0A = 30;					// Set compare Match Register -> Will interrupt every 0.0002 with the prescaler set to 64
 	TIMSK0 |= _BV(OCIE0A);		// Enable timer compare A interrupt
-	sei();
+	//sei();
 }
 
 static inline void timer1_start(){
@@ -80,6 +84,7 @@ static volatile uint8_t fire_triac = 0;
 static volatile uint8_t zc_debounce = 0;
 static volatile ZeroDetectionState_t state = State_Uncalibrated;
 
+/*
 static inline void turnOn(){
 	GIMSK |= _BV(INT0);		//Enable INT0
 }
@@ -88,6 +93,7 @@ static inline void turnOff(){
 	state = State_Uncalibrated;
 	GIMSK &= ~(_BV(INT0));		//Disable INT0
 }
+*/
 
 static inline uint8_t ldr_read()
 {
@@ -100,8 +106,6 @@ typedef enum  {
 	LIGHT_COUNT_TIME_ON,
 	LIGHT_ON,
 } ldr_state_t;
-
-
 
 static inline uint8_t secs_counter_read(void)
 {
@@ -168,7 +172,6 @@ static main_state_t main_state = MAIN_IDLE;
 static uint8_t pulse_counter = 0;
 static uint8_t main_timer = 0;
 
-/*
 static void main_state_machine(void)
 {
 	uint8_t aux;
@@ -222,8 +225,8 @@ static void main_state_machine(void)
 	}
 
 }
-*/
-
+/*
+//Used to test zero detection as clock source
 int main(void)
 {
 	OUTPUT(LED);
@@ -267,7 +270,28 @@ int main(void)
 		LOW(LED);
 	}
 }
-/*
+*/
+
+static void writeConfiguration(uint8_t cfgByte){
+	eeprom_update_byte((uint8_t*)0, 0xAA);//Write magic number
+	eeprom_update_byte((uint8_t*)1, cfgByte);
+}
+
+static uint8_t readConfiguration()
+{
+	uint8_t magicNumber;
+	uint8_t cfgByte;
+	magicNumber = eeprom_read_byte((uint8_t*)0);//Read magic number
+	if(magicNumber==0xAA){
+		cfgByte = eeprom_read_byte((uint8_t*)1);
+	}
+	else{
+		cfgByte = 8;//The default mode is humidity with 8 %
+		writeConfiguration(cfgByte);
+	}
+	return cfgByte;
+}
+
 int main(void)
 {
 	timer1_init();
@@ -282,29 +306,26 @@ int main(void)
 	INPUT(ZERO_IN);
 	HIGH(ZERO_IN);
 
-	INPUT(PUSH_IN);
-	HIGH(PUSH_IN);
+	//GIFR = GIFR;          //Clear interrupt flags
+	GIMSK |= _BV(INT0);		//Enable INT0
+	MCUCR |= _BV(ISC01);    //INT0 in Falling edge
+	sei();
 
-	GIFR = GIFR;             //Clear interrupt flags
-
-	MCUCR |= _BV(ISC01);     //INT0 in Falling edge
-
-	char oldState = READ(PUSH_IN);
 	char humidity_read_delay = 0;
 
 	init_dht11();
 	adc_init();
-
 
 	for(char i=0; i<5;++i){
 		TOGGLE(LED);
 		_delay_ms(250);
 	}
 	LOW(LED);
+
 	int8_t secs = 0;
 	int8_t pulse_occurred = 0;
 	uint8_t elapsed;
-	timer1_start();
+
 
 	while(1){
 		pulse_occurred = ldr_state_machine();
@@ -366,7 +387,6 @@ int main(void)
 		}
 	}
 }
-*/
 
 //int main2(void)
 //{
@@ -491,11 +511,14 @@ ISR(INT0_vect)
 		return;
 
 
-	subsecs_counter++;
-	if(subsecs_counter==50){
-		subsecs_counter = 0;
+	subsec_counter++;
+	if(subsec_counter==50){
+		subsec_counter = 0;
 		secs_counter++;
 	}
+
+	if(!turn_on_flag)
+		return;
 /*
 	//HIGH(AUX_OUT);
 	if(state==State_Calibration){
@@ -528,12 +551,7 @@ ISR(INT0_vect)
 }
 
 ISR(TIM0_COMPA_vect) {
-	//TOGGLE(LED);
-	subsecs_counter++;
-	if(subsecs_counter>ONE_SECOND){
-		subsecs_counter = 0;
-		secs_counter++;
-	}
+
 	/*
 	//LOW(AUX_OUT);
 	if(state==State_Calibration){
