@@ -25,6 +25,9 @@
 #define ONE_SECOND 50
 //Incremented in zero crossing
 static uint8_t subsec_counter = 0;
+
+//Incremented in zero crossing
+static volatile uint8_t cycles_counter = 0;
 //Incremented every second
 static volatile uint8_t secs_counter = 0;
 
@@ -102,76 +105,89 @@ static inline uint8_t ldr_read()
 }
 
 typedef enum  {
-	LIGHT_IDLE,
+	LIGHT_OFF,
 	LIGHT_COUNT_TIME_ON,
 	LIGHT_ON,
-} ldr_state_t;
+} light_state_t;
+
+typedef enum  {
+	LIGHT_EVT_IDLE,
+	LIGHT_EVT_ON,
+	LIGHT_EVT_PULSE,
+	LIGHT_EVT_OFF,
+} light_event_t;
+
 
 static inline uint8_t secs_counter_read(void)
 {
 	uint8_t aux;
-	//cli();
 	aux = secs_counter;
-	//sei();
 	return aux;
 }
 
 #define LDR_PULSE_MAX_TIME 5
-static ldr_state_t ldr_state = LIGHT_IDLE;
-static uint8_t ldr_timer = 0;
+static light_state_t light_state = LIGHT_OFF;
+static uint8_t light_timer = 0;
 
-static uint8_t ldr_state_machine(void)
+static light_event_t light_state_machine(const uint8_t now)
 {
-	uint8_t res = 0;
+	light_event_t event = LIGHT_EVT_IDLE;
 	uint8_t elapsed;
-	uint8_t secs = secs_counter_read();
 	uint8_t ldr_on = ldr_read();
-	switch(ldr_state){
-	case LIGHT_IDLE:
+	switch(light_state){
+	case LIGHT_OFF:
 		if(ldr_on){
 			//Switch state and start measuring time
-			ldr_state = LIGHT_COUNT_TIME_ON;
-			ldr_timer = secs;
+			light_state = LIGHT_COUNT_TIME_ON;
+			light_timer = now;
 		}
 		break;
 	case LIGHT_COUNT_TIME_ON:
 		if(ldr_on){
-			elapsed = secs - ldr_timer;
+			elapsed = now - light_timer;
 			if(elapsed>LDR_PULSE_MAX_TIME){
 				//If the light is on for more that the max pulse time we switch state
-				ldr_state = LIGHT_ON;
+				light_state = LIGHT_ON;
+				event = LIGHT_EVT_ON;
 			}
 		}
 		else{
-			ldr_state = LIGHT_IDLE;
 			//We got a pulse
-			res = 1;
+			event = LIGHT_EVT_PULSE;
+			light_state = LIGHT_OFF;
 		}
 		break;
 	case LIGHT_ON:
 		//Keep in this state until the light turns off
 		if(!ldr_on){
-			ldr_state = LIGHT_IDLE;
+			light_state = LIGHT_OFF;
+			event = LIGHT_EVT_OFF;
 		}
 		break;
 	}
-	return res;
+	return event;
 }
 
 typedef enum  {
-	MAIN_IDLE,
-	MAIN_COUNTING,
-	MAIN_PGM_MODE,
-} main_state_t;
+	MENU_IDLE,
+	MENU_CFG_ACTIVATION,
+	MENU_CFG_MODE,
+} menu_state_t;
 
-#define PGM_MODE_ACTIVATION_MAX_TIME 10
-#define PGM_MODE_MAX_TIME 10
-#define PGM_MODE_PULSES 5
+typedef enum  {
+	LIGHT_MODE_STATE_OFF,
+	LIGHT_MODE_STATE_DEBOUNCE,
+	LIGHT_MODE_STATE_ON
+} light_mode_state_t;
 
-static main_state_t main_state = MAIN_IDLE;
-static uint8_t pulse_counter = 0;
-static uint8_t main_timer = 0;
+#define CFG_MODE_ACTIVATION_MAX_TIME 10
+#define CFG_MODE_MAX_TIME 10
+#define CFG_MODE_PULSES 5
+#define HUMIDITY_READ_PERIOD 30
+#define LIGHT_DEBOUNCE_PERIOD 60
 
+
+/*
 static void main_state_machine(void)
 {
 	uint8_t aux;
@@ -225,54 +241,17 @@ static void main_state_machine(void)
 	}
 
 }
-/*
-//Used to test zero detection as clock source
-int main(void)
-{
-	OUTPUT(LED);
-	OUTPUT(OUT1);
-	//OUTPUT(AUX_OUT);
-	HIGH(OUT1);
-
-	//Setup inputs
-	INPUT(ZERO_IN);
-	HIGH(ZERO_IN);
-
-	//INPUT(PUSH_IN);
-	//HIGH(PUSH_IN);
-
-
-	for(char i=0; i<5;++i){
-		TOGGLE(LED);
-		_delay_ms(250);
-	}
-	LOW(LED);
-
-	int8_t secs = 0;
-	int8_t pulse_occurred = 0;
-	uint8_t t0;
-
-	//GIFR = GIFR;             //Clear interrupt flags
-	GIMSK |= _BV(INT0);		//Enable INT0
-	MCUCR |= _BV(ISC01);     //INT0 in Falling edge
-	sei();
-
-	uint8_t now;
-	t0 = secs_counter_read();
-	while(1){
-		do{
-			now = secs_counter_read();
-		}
-		while((now-t0)<60);
-		t0 = now;
-		HIGH(LED);
-		_delay_ms(250);
-		LOW(LED);
-	}
-}
 */
 
-static void writeConfiguration(uint8_t cfgByte){
+
+static uint8_t mul10(uint8_t v)
+{
+	v = v << 1;
+	return v+v+v+v+v;
+}
+
+static void writeConfiguration(uint8_t cfgByte)
+{
 	eeprom_update_byte((uint8_t*)0, 0xAA);//Write magic number
 	eeprom_update_byte((uint8_t*)1, cfgByte);
 }
@@ -286,14 +265,32 @@ static uint8_t readConfiguration()
 		cfgByte = eeprom_read_byte((uint8_t*)1);
 	}
 	else{
-		cfgByte = 8;//The default mode is humidity with 8 %
+		cfgByte = 80;//The default mode is humidity with 80 %
 		writeConfiguration(cfgByte);
 	}
 	return cfgByte;
 }
 
+static void delay_cycles(uint8_t cycles){
+	uint8_t ts = cycles_counter;
+	uint8_t elapsed;
+	do {
+		elapsed = cycles_counter-ts;
+	} while(elapsed<cycles);
+}
+
 int main(void)
 {
+	menu_state_t menu_state = MENU_IDLE;
+	uint8_t pulse_counter = 0;//Used to count pulses to activate the configuration mode and counting pulses to set the mode
+	uint8_t main_timer; //used to measure time between humidity measures
+	uint8_t menu_timer = 0; //Used to measure time in seconds, for example in the configuration mode
+	/* keeps the coniguration mode where a value below 100 uses humidity as a trigger and the value is the humidity threshold.
+	 * A value above 100 means the unit works as a timer activated by light
+	 */
+	uint8_t cfg_mode;
+	light_mode_state_t light_mode_state = LIGHT_MODE_STATE_OFF;
+
 	timer1_init();
 
 	//Setup outputs
@@ -311,58 +308,116 @@ int main(void)
 	MCUCR |= _BV(ISC01);    //INT0 in Falling edge
 	sei();
 
-	char humidity_read_delay = 0;
-
 	init_dht11();
 	adc_init();
-
+/*
 	for(char i=0; i<5;++i){
 		TOGGLE(LED);
-		_delay_ms(250);
+		delay_cycles(25);
+		//_delay_ms(250);
 	}
+	*/
 	LOW(LED);
 
-	int8_t secs = 0;
-	int8_t pulse_occurred = 0;
-	uint8_t elapsed;
-
-
+	cfg_mode = readConfiguration();
+	cfg_mode= 70;
+	main_timer = secs_counter_read();
 	while(1){
-		pulse_occurred = ldr_state_machine();
-		secs = secs_counter_read();
-		switch (main_state) {
-			case MAIN_IDLE:
+		uint8_t elapsed;
+		int8_t now = secs_counter_read();
+		light_event_t light_event = light_state_machine(now);
+		if(menu_state == MENU_IDLE){
+			/*
+			if(light_event==LIGHT_EVT_ON){
+				HIGH(LED);
+			}
+			else if(light_event==LIGHT_EVT_OFF){
 				LOW(LED);
-				if(pulse_occurred){
+			}
+			*/
+			if(cfg_mode<=100){//Humidity mode
+				elapsed = now - main_timer;
+				if(elapsed>HUMIDITY_READ_PERIOD){
+					int8_t aux = read_humidity();
+					if(aux>0){
+						//Successful read
+						if(aux>=cfg_mode){
+							HIGH(LED);
+						}
+						else{
+							LOW(LED);
+						}
+					}
+					main_timer = now;
+				}
+			}
+			else{//timer mode
+				switch(light_mode_state){
+
+					case LIGHT_MODE_STATE_DEBOUNCE:
+						if(light_event==LIGHT_EVT_OFF){
+							light_mode_state = LIGHT_MODE_STATE_OFF;
+						}
+						else{
+							elapsed = now - main_timer;
+							if(elapsed>LIGHT_DEBOUNCE_PERIOD){
+								light_mode_state = LIGHT_MODE_STATE_ON;
+								HIGH(LED);
+							}
+						}
+						break;
+					case LIGHT_MODE_STATE_ON:
+						if(light_event==LIGHT_EVT_OFF){
+							light_mode_state = LIGHT_MODE_STATE_OFF;
+							LOW(LED);
+						}
+						break;
+					case LIGHT_MODE_STATE_OFF:
+					default:
+						if(light_event==LIGHT_EVT_ON){
+							main_timer = now;
+							light_mode_state = LIGHT_MODE_STATE_DEBOUNCE;
+						}
+					break;
+				}
+			}
+		}
+
+		switch (menu_state) {
+			case MENU_IDLE:
+				if(light_event==LIGHT_EVT_PULSE){
 					//Pulse ocurred
 					pulse_counter = 1;
-					main_state = MAIN_COUNTING;
-					main_timer = secs;
+					menu_state = MENU_CFG_ACTIVATION;
+					menu_timer = now;
 				}
 				break;
-			case MAIN_COUNTING:
-				elapsed = secs - main_timer;
-				if(elapsed>PGM_MODE_ACTIVATION_MAX_TIME){
-					main_state = MAIN_IDLE;
+			case MENU_CFG_ACTIVATION:
+				elapsed = now - menu_timer;
+				if(elapsed>CFG_MODE_ACTIVATION_MAX_TIME){
+					menu_state = MENU_IDLE;
+					LOW(LED);
 				}
 				else{
-					if(pulse_occurred){
-						main_timer = secs;
+					if(light_event==LIGHT_EVT_PULSE){
+						menu_timer = now;
 						pulse_counter++;
-						if(pulse_counter>=PGM_MODE_PULSES){
+						if(pulse_counter>=CFG_MODE_PULSES){
 							HIGH(LED);
-							main_state = MAIN_PGM_MODE;
+							menu_state = MENU_CFG_MODE;
 							pulse_counter = 0;
 						}
 					}
 				}
 				break;
-			case MAIN_PGM_MODE:
-				elapsed = secs - main_timer;
-				if(elapsed>PGM_MODE_MAX_TIME){
-					main_state = MAIN_IDLE;
+			case MENU_CFG_MODE:
+				elapsed = now - menu_timer;
+				if(elapsed>CFG_MODE_MAX_TIME){
+					menu_state = MENU_IDLE;
 					if(pulse_counter>0){
+						cfg_mode = mul10(pulse_counter);
 						//Save settings
+						writeConfiguration(cfg_mode);
 						LOW(LED);
 						while(pulse_counter>0){
 							--pulse_counter;
@@ -373,124 +428,21 @@ int main(void)
 						}
 					}
 				}
-				if(pulse_occurred){
+				if(light_event==LIGHT_EVT_PULSE){
 					TOGGLE(LED);
 					_delay_ms(100);
 					TOGGLE(LED);
-					main_timer = secs;
+					menu_timer = now;
 					pulse_counter++;
 				}
 				break;
 			default:
-				main_state = MAIN_IDLE;
+				menu_state = MENU_IDLE;
 				break;
 		}
 	}
 }
 
-//int main2(void)
-//{
-//	timer1_init();
-//
-//	//Setup outputs
-//	OUTPUT(LED);
-//	OUTPUT(OUT1);
-//	//OUTPUT(AUX_OUT);
-//	HIGH(OUT1);
-//
-//	//Setup inputs
-//	INPUT(ZERO_IN);
-//	HIGH(ZERO_IN);
-//
-//	INPUT(PUSH_IN);
-//	HIGH(PUSH_IN);
-//
-//	GIFR = GIFR;             //Clear interrupt flags
-//
-//	MCUCR |= _BV(ISC01);     //INT0 in Falling edge
-//
-//	char oldState = READ(PUSH_IN);
-//	char humidity_read_delay = 0;
-//
-//	init_dht11();
-//	adc_init();
-//
-//	for(char i=0; i<5;++i){
-//		TOGGLE(LED);
-//		_delay_ms(250);
-//	}
-//	LOW(LED);
-//	uint8_t fault = 0;
-//	int8_t aux = 0;
-//	while(1){
-//		main_state_machine();
-//		/*
-//		//Humidity sensor test
-//		if(fault){
-//			if(aux==-1){
-//				for(int i=0; i<10;++i){
-//					HIGH(LED);
-//					_delay_ms(50);
-//					LOW(LED);
-//					_delay_ms(50);
-//				}
-//			}
-//			else if(aux==-4){
-//				HIGH(LED);
-//				_delay_ms(250);
-//				LOW(LED);
-//				_delay_ms(250);
-//			}
-//			else{
-//				HIGH(LED);
-//				_delay_ms(20);
-//				LOW(LED);
-//				_delay_ms(480);
-//			}
-//		}
-//		else{
-//			_delay_ms(500);
-//		}
-//		if(humidity_read_delay++ >= 10){
-//			humidity_read_delay = 0;
-//			aux = read_humidity();
-//			fault = aux<0;
-//			if(aux>50){
-//				HIGH(LED);
-//			}
-//			else{
-//				LOW(LED);
-//			}
-//		}
-//		*/
-//		/*
-//		char aux = READ(PUSH_IN);
-//		if(aux!=oldState){
-//			if(!aux){
-//				turnOn();
-//			}
-//			else{
-//				turnOff();
-//			}
-//			oldState = aux;
-//		}
-//		*/
-//		/*
-//		uint8_t ldr = adc_read();
-//		if(ldr<200){
-//			HIGH(LED);
-//		}
-//		else{
-//			LOW(LED);
-//		}
-//		*/
-//		/*
-//		_delay_ms(250);
-//		LOW(LED);
-//		_delay_ms(250);
-//		*/
-//	}
-//}
 
 
 #define INVALID 255
@@ -510,7 +462,7 @@ ISR(INT0_vect)
 	if(tmp==INVALID)
 		return;
 
-
+	cycles_counter++;
 	subsec_counter++;
 	if(subsec_counter==50){
 		subsec_counter = 0;
@@ -580,13 +532,6 @@ ISR(TIM0_COMPA_vect) {
 	*/
 }
 
-
-//
-//ISR(TIM0_COMPA_vect) {
-//	//TOGGLE(AUX_OUT);
-//	TOGGLE(OUT1);
-//	stopTimer1();
-//}
 
 
 
