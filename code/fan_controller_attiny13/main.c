@@ -24,12 +24,15 @@
 //The mains frequency
 #define ONE_SECOND 50
 //Incremented in zero crossing
-static uint8_t subsec_counter = 0;
+//static uint8_t subsec_counter = 0;
+register uint8_t subsec_counter asm("r10");
 
 //Incremented in zero crossing
-static volatile uint8_t cycles_counter = 0;
+//static volatile uint8_t cycles_counter = 0;
+register uint8_t cycles_counter asm("r11");
 //Incremented every second
 static volatile uint8_t secs_counter = 0;
+
 
 static volatile uint8_t turn_on_flag = 0;
 
@@ -86,6 +89,27 @@ static volatile uint8_t zc_cycles = 0;
 static volatile uint8_t fire_triac = 0;
 static volatile uint8_t zc_debounce = 0;
 static volatile ZeroDetectionState_t state = State_Uncalibrated;
+
+#ifdef DEBUG
+
+#define DEBUG_LED_ON()		HIGH(LED)
+#define DEBUG_LED_OFF()		LOW(LED)
+
+static inline void turnOn()
+{
+	HIGH(LED);
+}
+
+static inline void turnOff()
+{
+	LOW(LED);
+}
+
+
+#else
+
+
+#endif
 
 /*
 static inline void turnOn(){
@@ -342,10 +366,10 @@ int main(void)
 					if(aux>0){
 						//Successful read
 						if(aux>=cfg_mode){
-							HIGH(LED);
+							turnOn();
 						}
 						else{
-							LOW(LED);
+							turnOff();
 						}
 					}
 					main_timer = now;
@@ -362,14 +386,14 @@ int main(void)
 							elapsed = now - main_timer;
 							if(elapsed>LIGHT_DEBOUNCE_PERIOD){
 								light_mode_state = LIGHT_MODE_STATE_ON;
-								HIGH(LED);
+								turnOn();
 							}
 						}
 						break;
 					case LIGHT_MODE_STATE_ON:
 						if(light_event==LIGHT_EVT_OFF){
 							light_mode_state = LIGHT_MODE_STATE_OFF;
-							LOW(LED);
+							turnOff();
 						}
 						break;
 					case LIGHT_MODE_STATE_OFF:
@@ -396,14 +420,14 @@ int main(void)
 				elapsed = now - menu_timer;
 				if(elapsed>CFG_MODE_ACTIVATION_MAX_TIME){
 					menu_state = MENU_IDLE;
-					LOW(LED);
+					DEBUG_LED_OFF();
 				}
 				else{
 					if(light_event==LIGHT_EVT_PULSE){
 						menu_timer = now;
 						pulse_counter++;
 						if(pulse_counter>=CFG_MODE_PULSES){
-							HIGH(LED);
+							DEBUG_LED_ON();
 							menu_state = MENU_CFG_MODE;
 							pulse_counter = 0;
 						}
@@ -421,17 +445,21 @@ int main(void)
 						LOW(LED);
 						while(pulse_counter>0){
 							--pulse_counter;
-							_delay_ms(250);
+							//delay_cycles(10);
+							//_delay_ms(250);
 							HIGH(LED);
-							_delay_ms(250);
+							delay_cycles(10);
+							//_delay_ms(250);
 							LOW(LED);
 						}
 					}
 				}
 				if(light_event==LIGHT_EVT_PULSE){
+
 					TOGGLE(LED);
 					_delay_ms(100);
 					TOGGLE(LED);
+
 					menu_timer = now;
 					pulse_counter++;
 				}
@@ -503,7 +531,29 @@ ISR(INT0_vect)
 }
 
 ISR(TIM0_COMPA_vect) {
-
+	uint8_t aux = zc_cycles;
+	uint8_t trigger = fire_triac;
+	if(state==State_Calibrated){
+		if(trigger){
+			if(trigger & 0x1){
+				LOW(OUT1);
+			}
+			else{
+				HIGH(OUT1);
+			}
+			trigger--;
+		}
+		aux++;
+		if(aux==zc_interval){
+			trigger = 6;
+			aux = 0;
+		}
+	}
+	else {
+		aux++;
+	}
+	zc_cycles = aux;
+	fire_triac = trigger;
 	/*
 	//LOW(AUX_OUT);
 	if(state==State_Calibration){
