@@ -18,23 +18,44 @@
 //#define PUSH_IN B,2
 //#define DHT_PIN B,3
 #define LED B,4
+#define AUX_OUT B,4
 
 //#define AUX_OUT B,4
 
 //The mains frequency
 #define ONE_SECOND 50
-//Incremented in zero crossing
-//static uint8_t subsec_counter = 0;
-register uint8_t subsec_counter asm("r10");
 
-//Incremented in zero crossing
-//static volatile uint8_t cycles_counter = 0;
-register uint8_t cycles_counter asm("r11");
+#define INTERVAL_50HZ 50
+#define INTERVAL_60HZ 42
+#define TRIAC_PULSES 10
+
+/*
+ * Incremented when zero crossing (every full cycle) and reset when it reaches 50(hz).
+ * It is used to count seconds
+ */
+register uint8_t subsec_counter asm("r2");
+
+/*
+ * Incremented when zero crossing and used to implement delays
+ */
+register uint8_t cycles_counter asm("r3");
+
+/*
+ * Incremented when the timer compare A interrupt occurs.
+ * Used to measure the number of timer ticks between zero crossings (one full cycle)
+ */
+register uint8_t zc_ticks asm("r4");
+
 //Incremented every second
 static volatile uint8_t secs_counter = 0;
 
+/*
+ * Keeps the number of timer ticks in half a cycle
+ */
+static volatile uint8_t zc_interval = INTERVAL_50HZ;
 
-static volatile uint8_t turn_on_flag = 0;
+static volatile uint8_t fire_triac = 0;
+
 
 void timer1_init(){
 	//cli();
@@ -55,6 +76,11 @@ static inline void timer1_stop(){
 	TCCR0B = 0;
 }
 
+static inline void timer1_restart(){
+	TCNT0 = 0;
+	TIFR0|= _BV(OCF0A);
+}
+
 static inline void adc_init()
 {
 	//Set the ADC prescaler to 64 making the ADC run at 150KHz (9.6MHz/64)
@@ -72,25 +98,19 @@ static uint8_t adc_read(void)
 	return ADCH;
 }
 
-#define STATE_UNDEFINED 0
-#define STATE_CALIBRATING 1
-#define STATE_RUNNING 2
-#define INTERVAL_50HZ 45
-#define INTERVAL_60HZ 42
 
 typedef enum {
-	State_Uncalibrated,
+	State_Idle,
+	//State_TurnOn,
 	State_Calibration,
-	State_Calibrated
+	State_PowerOn,
+	//State_TurnOff,
 } ZeroDetectionState_t;
 
-static volatile uint8_t zc_interval = INTERVAL_50HZ;
-static volatile uint8_t zc_cycles = 0;
-static volatile uint8_t fire_triac = 0;
-static volatile uint8_t zc_debounce = 0;
-static volatile ZeroDetectionState_t state = State_Uncalibrated;
 
-#ifdef DEBUG
+static volatile ZeroDetectionState_t state = State_Idle;
+
+#ifdef DEBUG2
 
 #define DEBUG_LED_ON()		HIGH(LED)
 #define DEBUG_LED_OFF()		LOW(LED)
@@ -108,19 +128,21 @@ static inline void turnOff()
 
 #else
 
+#define DEBUG_LED_ON()
+#define DEBUG_LED_OFF()
 
-#endif
-
-/*
 static inline void turnOn(){
-	GIMSK |= _BV(INT0);		//Enable INT0
+	state = State_Calibration;
+	//state = State_TurnOn;
 }
 
 static inline void turnOff(){
-	state = State_Uncalibrated;
-	GIMSK &= ~(_BV(INT0));		//Disable INT0
+	//state = State_TurnOff;
+	state = State_Idle;
 }
-*/
+
+#endif
+
 
 static inline uint8_t ldr_read()
 {
@@ -315,6 +337,7 @@ int main(void)
 	uint8_t cfg_mode;
 	light_mode_state_t light_mode_state = LIGHT_MODE_STATE_OFF;
 
+	zc_ticks = 0;
 	timer1_init();
 
 	//Setup outputs
@@ -350,124 +373,125 @@ int main(void)
 		uint8_t elapsed;
 		int8_t now = secs_counter_read();
 		light_event_t light_event = light_state_machine(now);
-		if(menu_state == MENU_IDLE){
-			/*
-			if(light_event==LIGHT_EVT_ON){
-				HIGH(LED);
-			}
-			else if(light_event==LIGHT_EVT_OFF){
-				LOW(LED);
-			}
-			*/
-			if(cfg_mode<=100){//Humidity mode
-				elapsed = now - main_timer;
-				if(elapsed>HUMIDITY_READ_PERIOD){
-					int8_t aux = read_humidity();
-					if(aux>0){
-						//Successful read
-						if(aux>=cfg_mode){
-							turnOn();
-						}
-						else{
-							turnOff();
-						}
-					}
-					main_timer = now;
-				}
-			}
-			else{//timer mode
-				switch(light_mode_state){
-
-					case LIGHT_MODE_STATE_DEBOUNCE:
-						if(light_event==LIGHT_EVT_OFF){
-							light_mode_state = LIGHT_MODE_STATE_OFF;
-						}
-						else{
-							elapsed = now - main_timer;
-							if(elapsed>LIGHT_DEBOUNCE_PERIOD){
-								light_mode_state = LIGHT_MODE_STATE_ON;
-								turnOn();
-							}
-						}
-						break;
-					case LIGHT_MODE_STATE_ON:
-						if(light_event==LIGHT_EVT_OFF){
-							light_mode_state = LIGHT_MODE_STATE_OFF;
-							turnOff();
-						}
-						break;
-					case LIGHT_MODE_STATE_OFF:
-					default:
-						if(light_event==LIGHT_EVT_ON){
-							main_timer = now;
-							light_mode_state = LIGHT_MODE_STATE_DEBOUNCE;
-						}
-					break;
-				}
-			}
+		if(light_event==LIGHT_EVT_ON){
+			turnOn();
 		}
-
-		switch (menu_state) {
-			case MENU_IDLE:
-				if(light_event==LIGHT_EVT_PULSE){
-					//Pulse ocurred
-					pulse_counter = 1;
-					menu_state = MENU_CFG_ACTIVATION;
-					menu_timer = now;
-				}
-				break;
-			case MENU_CFG_ACTIVATION:
-				elapsed = now - menu_timer;
-				if(elapsed>CFG_MODE_ACTIVATION_MAX_TIME){
-					menu_state = MENU_IDLE;
-					DEBUG_LED_OFF();
-				}
-				else{
-					if(light_event==LIGHT_EVT_PULSE){
-						menu_timer = now;
-						pulse_counter++;
-						if(pulse_counter>=CFG_MODE_PULSES){
-							DEBUG_LED_ON();
-							menu_state = MENU_CFG_MODE;
-							pulse_counter = 0;
-						}
-					}
-				}
-				break;
-			case MENU_CFG_MODE:
-				elapsed = now - menu_timer;
-				if(elapsed>CFG_MODE_MAX_TIME){
-					menu_state = MENU_IDLE;
-					if(pulse_counter>0){
-						cfg_mode = mul10(pulse_counter);
-						//Save settings
-						writeConfiguration(cfg_mode);
-						LOW(LED);
-						while(pulse_counter>0){
-							--pulse_counter;
-							//delay_cycles(10);
-							//_delay_ms(250);
-							HIGH(LED);
-							delay_cycles(10);
-							//_delay_ms(250);
-							LOW(LED);
-						}
-					}
-				}
-				if(light_event==LIGHT_EVT_PULSE){
-
-					TOGGLE(LED);
-					_delay_ms(100);
-					TOGGLE(LED);
-
-					menu_timer = now;
-					pulse_counter++;
-				}
-				break;
-			default:
-				menu_state = MENU_IDLE;
-				break;
+		else if(light_event==LIGHT_EVT_OFF){
+			turnOff();
 		}
+//		if(menu_state == MENU_IDLE){
+//
+//
+//
+//			if(cfg_mode<=100){//Humidity mode
+//				elapsed = now - main_timer;
+//				if(elapsed>HUMIDITY_READ_PERIOD){
+//					int8_t aux = read_humidity();
+//					if(aux>0){
+//						//Successful read
+//						if(aux>=cfg_mode){
+//							turnOn();
+//						}
+//						else{
+//							turnOff();
+//						}
+//					}
+//					main_timer = now;
+//				}
+//			}
+//			else{//timer mode
+//				switch(light_mode_state){
+//
+//					case LIGHT_MODE_STATE_DEBOUNCE:
+//						if(light_event==LIGHT_EVT_OFF){
+//							light_mode_state = LIGHT_MODE_STATE_OFF;
+//						}
+//						else{
+//							elapsed = now - main_timer;
+//							if(elapsed>LIGHT_DEBOUNCE_PERIOD){
+//								light_mode_state = LIGHT_MODE_STATE_ON;
+//								turnOn();
+//							}
+//						}
+//						break;
+//					case LIGHT_MODE_STATE_ON:
+//						if(light_event==LIGHT_EVT_OFF){
+//							light_mode_state = LIGHT_MODE_STATE_OFF;
+//							turnOff();
+//						}
+//						break;
+//					case LIGHT_MODE_STATE_OFF:
+//					default:
+//						if(light_event==LIGHT_EVT_ON){
+//							main_timer = now;
+//							light_mode_state = LIGHT_MODE_STATE_DEBOUNCE;
+//						}
+//					break;
+//				}
+//			}
+//		}
+//
+//		switch (menu_state) {
+//			case MENU_IDLE:
+//				if(light_event==LIGHT_EVT_PULSE){
+//					//Pulse ocurred
+//					pulse_counter = 1;
+//					menu_state = MENU_CFG_ACTIVATION;
+//					menu_timer = now;
+//				}
+//				break;
+//			case MENU_CFG_ACTIVATION:
+//				elapsed = now - menu_timer;
+//				if(elapsed>CFG_MODE_ACTIVATION_MAX_TIME){
+//					menu_state = MENU_IDLE;
+//					DEBUG_LED_OFF();
+//				}
+//				else{
+//					if(light_event==LIGHT_EVT_PULSE){
+//						menu_timer = now;
+//						pulse_counter++;
+//						if(pulse_counter>=CFG_MODE_PULSES){
+//							DEBUG_LED_ON();
+//							menu_state = MENU_CFG_MODE;
+//							pulse_counter = 0;
+//						}
+//					}
+//				}
+//				break;
+//			case MENU_CFG_MODE:
+//				elapsed = now - menu_timer;
+//				if(elapsed>CFG_MODE_MAX_TIME){
+//					menu_state = MENU_IDLE;
+//					if(pulse_counter>0){
+//						cfg_mode = mul10(pulse_counter);
+//						//Save settings
+//						writeConfiguration(cfg_mode);
+//						LOW(LED);
+//						while(pulse_counter>0){
+//							--pulse_counter;
+//							//delay_cycles(10);
+//							//_delay_ms(250);
+//							HIGH(LED);
+//							delay_cycles(10);
+//							//_delay_ms(250);
+//							LOW(LED);
+//						}
+//					}
+//				}
+//				if(light_event==LIGHT_EVT_PULSE){
+//
+//					TOGGLE(LED);
+//					_delay_ms(100);
+//					TOGGLE(LED);
+//
+//					menu_timer = now;
+//					pulse_counter++;
+//				}
+//				break;
+//			default:
+//				menu_state = MENU_IDLE;
+//				break;
+//		}
 	}
 }
 
@@ -478,17 +502,10 @@ int main(void)
 
 ISR(INT0_vect)
 {
-	char tmp;
-	for(tmp=0; tmp<5;){
-		if(!READ(ZERO_IN)){
-			tmp++;
-		}
-		else{
-			tmp = INVALID;
-		}
-	}
-	if(tmp==INVALID)
+	//Ignore spurious interrupts
+	if(zc_ticks>1 && zc_ticks<25){
 		return;
+	}
 
 	cycles_counter++;
 	subsec_counter++;
@@ -497,89 +514,49 @@ ISR(INT0_vect)
 		secs_counter++;
 	}
 
-	if(!turn_on_flag)
-		return;
-/*
-	//HIGH(AUX_OUT);
-	if(state==State_Calibration){
-		if(zc_cycles>75 && zc_cycles<110){
-			state = State_Calibrated;
-			zc_interval = (zc_cycles>>1);
-			zc_cycles = 0;
-			TCNT0 = 0;
+	TOGGLE(AUX_OUT);
+	switch(state){
+	case State_PowerOn:
+		fire_triac = TRIAC_PULSES;
+		break;
+	case State_Calibration:
+		if(zc_ticks>75 && zc_ticks<110){
+			state = State_PowerOn;
+			zc_interval = (zc_ticks>>1);
 		}
-		else{
-			state = State_Uncalibrated;
-			timer1_stop();
-		}
+		break;
+	default:
+		break;
 	}
-	else if(state==State_Calibrated){
-		if(zc_cycles>zc_interval){//Ignore possible oscilations
-			fire_triac = 5;
-			zc_cycles = 0;
-			TCNT0 = 0;
-			TIFR0|= _BV(OCF0A);
-		}
-	}
-	else{
-		zc_interval = INVALID;
-		zc_cycles = 0;
-		state = State_Calibration;
-		timer1_start();
-	}
-*/
+	zc_ticks = 0;
+	timer1_start();
 }
 
 ISR(TIM0_COMPA_vect) {
-	uint8_t aux = zc_cycles;
-	uint8_t trigger = fire_triac;
-	if(state==State_Calibrated){
+	if(zc_ticks>110){
+		timer1_stop();
+		return;
+	}
+	zc_ticks++;
+	if(state==State_PowerOn){
+		uint8_t trigger;
+		if(zc_ticks==zc_interval){
+			trigger = TRIAC_PULSES;
+		}
+		else{
+			trigger = fire_triac;
+		}
 		if(trigger){
+			trigger--;
 			if(trigger & 0x1){
 				LOW(OUT1);
 			}
 			else{
 				HIGH(OUT1);
 			}
-			trigger--;
 		}
-		aux++;
-		if(aux==zc_interval){
-			trigger = 6;
-			aux = 0;
-		}
+		fire_triac = trigger;
 	}
-	else {
-		aux++;
-	}
-	zc_cycles = aux;
-	fire_triac = trigger;
-	/*
-	//LOW(AUX_OUT);
-	if(state==State_Calibration){
-		zc_cycles++;
-	}
-	else if(state==State_Calibrated){
-		if(fire_triac>0){
-			if(fire_triac & 0x1){
-				LOW(OUT1);
-			}
-			else{
-				HIGH(OUT1);
-			}
-			fire_triac--;
-		}
-		zc_cycles++;
-		if(zc_cycles==zc_interval){
-			fire_triac = 6;
-			zc_cycles = 0;
-		}
-	}
-	else{
-		//timer1_stop();
-		//HIGH(OUT1);
-	}
-	*/
 }
 
 
