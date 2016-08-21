@@ -73,11 +73,11 @@ static int8_t read_bit(void) {
 	 */
 	uint16_t bit_time = 0;
 	uint16_t bitstart_delay = 0;
-  while(!READ(DHT_PIN)){
+	while(!READ(DHT_PIN)){
 	  if(bitstart_delay++ == MAX_WAIT)
-		  return -1; // bad edge
-  }
-  while(READ(DHT_PIN)){
+			  return -1; // bad edge
+	}
+	while(READ(DHT_PIN)){
   	  if(bit_time++ == MAX_WAIT)
   		  return -1; // bad edge
     }
@@ -104,8 +104,19 @@ int8_t read_humidity(void)
 
   union _dht_output raw = { .bytes={0} };
   for(uint8_t byte = 0; byte < sizeof(raw); byte++) {
+	  uint8_t aux = 0;
+	  for(uint8_t bit = 0; bit < 8; bit++) {
+	  		int8_t b = read_bit();
+	  		if(b<0){
+	  			return bad_bit_data_pause; // invalid data pulse
+	  		}
+	  		aux = aux << 1;
+	  		aux |= b & 0x01;
+	  	}
+	    raw.bytes[byte] = aux;
+	  /*
 	for(int8_t bit = 7; bit >= 0; bit--) {
-		int8_t b =read_bit();
+		int8_t b = read_bit();
 		if(b<0){
 			return bad_bit_data_pause; // invalid data pulse
 		}
@@ -113,6 +124,7 @@ int8_t read_humidity(void)
 			raw.bytes[byte] |= _BV(bit);
 		}
 	}
+	*/
   }
 
   if(raw.data.checksum != (uint8_t)(raw.bytes[0]+raw.bytes[1]+raw.bytes[2]+raw.bytes[3]))
