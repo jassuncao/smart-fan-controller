@@ -8,6 +8,6 @@
 #ifndef CONFIG_H_
 #define CONFIG_H_
 
-#define DHT_PIN B,3
+#define DHT_PIN B,4
 
 #endif /* CONFIG_H_ */

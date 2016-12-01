@@ -26,6 +26,7 @@
 #define HIGH(pin)            _SET(PORT,pin)
 #define LOW(pin)            _CLEAR(PORT,pin)
 #define TOGGLE(pin)            _TOGGLE(PORT,pin)
+#define FAST_TOGGLE(pin)            _SET(PIN,pin)
 #define READ(pin)            _GET(PIN,pin)
 
 #endif /* MACRO_HELPERS_H_ */

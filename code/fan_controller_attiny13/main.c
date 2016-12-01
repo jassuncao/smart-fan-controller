@@ -8,35 +8,53 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <avr/eeprom.h>
+#include <avr/power.h>
+#include <avr/sleep.h>
 #include <util/delay.h>
 #include "macro_helpers.h"
 #include "dht11.h"
 
-
-#define OUT_BIT 0
-#define ZERO_IN_BIT 1
-#define LED_BIT 4
-
 #define OUT1 B,0
 #define ZERO_IN B,1
-//#define PUSH_IN B,2
-//#define DHT_PIN B,3
-#define LED B,4
-//#define AUX_OUT B,4
-
-//#define AUX_OUT B,0
+#define LED B,3
+//#define DHT_PIN B,4
 
 //The mains frequency
 #define ONE_SECOND 50
 
 #define INTERVAL_50HZ 50
 #define INTERVAL_60HZ 42
-#define TRIAC_PULSES 10
+#define TRIAC_PULSES 20
 
 #define MS_TO_CYCLES(X) X/20
 
+typedef enum  {
+	LIGHT_OFF,
+	LIGHT_COUNT_TIME_ON,
+	LIGHT_ON,
+} light_state_t;
+
+typedef enum  {
+	LIGHT_EVT_IDLE,
+	LIGHT_EVT_ON,
+	LIGHT_EVT_PULSE,
+	LIGHT_EVT_OFF,
+} light_event_t;
+
+typedef enum  {
+	MENU_IDLE,
+	MENU_CFG_ACTIVATION,
+	MENU_CFG_MODE,
+} menu_state_t;
+
+typedef enum  {
+	LIGHT_MODE_STATE_OFF,
+	LIGHT_MODE_STATE_DEBOUNCE,
+	LIGHT_MODE_STATE_ON
+} light_mode_state_t;
+
 /*
- * Incremented when zero crossing (every full cycle) and reset when it reaches 50(hz).
+ * Incremented when zero crossing (every half cycle) and reset when it reaches 100(hz).
  * We use it to count seconds
  */
 register uint8_t subsec_counter asm("r2");
@@ -56,28 +74,41 @@ register uint8_t zc_ticks asm("r4");
 //Incremented every second
 static volatile uint8_t secs_counter = 0;
 
-/*
- * Keeps the number of timer ticks in half a cycle
- */
-static volatile uint8_t zc_interval = INTERVAL_50HZ;
-//static const uint8_t zc_interval = INTERVAL_50HZ;
+//static volatile uint8_t triac_edges = 0;
+register uint8_t triac_edges asm("r5");
 
-static volatile uint8_t fire_triac = 0;
-//register uint8_t fire_triac asm("r5");
+static volatile uint8_t triac_on = 0;
 
+//If the light is kept on less than LDR_PULSE_MAX_TIME (seconds) we consider it a pulse
+#define LDR_PULSE_MAX_TIME 5
+//We enter CFG mode when the light switches CFG_MODE_PULSES times in less than CFG_MODE_ACTIVATION_MAX_TIME
+#define CFG_MODE_PULSES 5
+#define CFG_MODE_ACTIVATION_MAX_TIME 10
+
+#define CFG_MODE_MAX_TIME 10
+
+#define HUMIDITY_READ_PERIOD 30
+//In light mode, we only turn the fan on if the light is kept on for at least LIGHT_DEBOUNCE_PERIOD seconds
+#define LIGHT_DEBOUNCE_PERIOD 15
+
+static light_state_t light_state = LIGHT_OFF;
+
+static uint8_t light_timer = 0;
 
 void timer1_init(){
 	TCCR0B = 0;
 	TCNT0  = 0;					// Initialize counter value to 0
 	TCCR0A = _BV(WGM01); 		// Turn on CTC mode
-	OCR0A = 30;					// Set compare Match Register -> Will interrupt every 0.0002 with the prescaler set to 64
+	//TCCR0A |= _BV(COM0A0);		// Enable the Output compare A pin in toggle mode
+	OCR0A = 240;				// Set compare Match Register -> Will interrupt every 0.0002 with the prescaler set to 0
 	TIMSK0 |= _BV(OCIE0A);		// Enable timer compare A interrupt
-	TIFR0  |= _BV(OCF0A);
+	TIFR0  |= _BV(OCF0A);		// Clear the output compare A flag
+	//TCCR0B |= _BV(FOC0A);		// Force output compare A ensuring the output pin is in high state (the triac is active low)
 }
 
 static inline void timer1_start(){
 	TCNT0  = 0;
-	TCCR0B = _BV(CS01) | _BV(CS00); // Set prescaler to 64
+	TCCR0B = _BV(CS00); // Set prescaler to 0
 }
 
 static inline void timer1_stop(){
@@ -94,7 +125,7 @@ static inline void adc_init()
 	//Set the ADC prescaler to 64 making the ADC run at 150KHz (9.6MHz/64)
 	ADCSRA = _BV(ADPS2) | _BV(ADPS1);
 	ADMUX  = _BV(ADLAR) | _BV(MUX0); //Use VCC as reference, PB2 as input and Left align the ADC value
-	//DIDR0 = _BV(ADC1D); //Disable digital input PB2
+	DIDR0 = _BV(ADC1D); //Disable digital input PB2
 }
 
 static uint8_t adc_read(void)
@@ -106,22 +137,18 @@ static uint8_t adc_read(void)
 	return ADCH;
 }
 
+static inline uint8_t ldr_read()
+{
+	uint8_t ldr = adc_read();
+	return ldr < 200;
+}
 
-typedef enum {
-	State_Idle,
-	//State_TurnOn,
-	State_Calibration,
-	State_PowerOn,
-	//State_TurnOff,
-} ZeroDetectionState_t;
-
-
-static volatile ZeroDetectionState_t state = State_Idle;
 
 #ifdef DEBUG2
 
-#define DEBUG_LED_ON()		HIGH(LED)
-#define DEBUG_LED_OFF()		LOW(LED)
+#define DEBUG_LED_INIT() OUTPUT(LED)
+#define DEBUG_LED_ON()	HIGH(LED)
+#define DEBUG_LED_OFF()	 LOW(LED)
 
 static inline void turnOn()
 {
@@ -136,52 +163,29 @@ static inline void turnOff()
 
 #else
 
-#define DEBUG_LED_ON() HIGH(LED)
+#define DEBUG_LED_INIT() OUTPUT(LED)
+#define DEBUG_LED_ON()	HIGH(LED)
 #define DEBUG_LED_OFF() LOW(LED)
 
 static inline void turnOn(){
-	state = State_Calibration;
+	triac_on = 1;
 }
 
 static inline void turnOff(){
-	//state = State_TurnOff;
-	state = State_Idle;
+	triac_on = 0;
 }
 
 #endif
 
-
-static inline uint8_t ldr_read()
-{
-	uint8_t ldr = adc_read();
-	return ldr<200;
-}
-
-typedef enum  {
-	LIGHT_OFF,
-	LIGHT_COUNT_TIME_ON,
-	LIGHT_ON,
-} light_state_t;
-
-typedef enum  {
-	LIGHT_EVT_IDLE,
-	LIGHT_EVT_ON,
-	LIGHT_EVT_PULSE,
-	LIGHT_EVT_OFF,
-} light_event_t;
-
-
 static inline uint8_t secs_counter_read(void)
 {
-	uint8_t aux;
-	aux = secs_counter;
-	return aux;
+	return secs_counter;
 }
 
-#define LDR_PULSE_MAX_TIME 5
-static light_state_t light_state = LIGHT_OFF;
-static uint8_t light_timer = 0;
-
+/*
+ * light_state_machine polls the LDR and produces the following events: light turned on, light turned off, light pulsed.
+ * Returns LIGHT_EVT_IDLE when nothing happened
+ */
 static light_event_t light_state_machine(const uint8_t now)
 {
 	light_event_t event = LIGHT_EVT_IDLE;
@@ -221,82 +225,6 @@ static light_event_t light_state_machine(const uint8_t now)
 	return event;
 }
 
-typedef enum  {
-	MENU_IDLE,
-	MENU_CFG_ACTIVATION,
-	MENU_CFG_MODE,
-} menu_state_t;
-
-typedef enum  {
-	LIGHT_MODE_STATE_OFF,
-	LIGHT_MODE_STATE_DEBOUNCE,
-	LIGHT_MODE_STATE_ON
-} light_mode_state_t;
-
-#define CFG_MODE_ACTIVATION_MAX_TIME 10
-#define CFG_MODE_MAX_TIME 10
-#define CFG_MODE_PULSES 5
-#define HUMIDITY_READ_PERIOD 30
-#define LIGHT_DEBOUNCE_PERIOD 60
-
-
-/*
-static void main_state_machine(void)
-{
-	uint8_t aux;
-	uint8_t elapsed;
-	switch (main_state) {
-		case MAIN_IDLE:
-			LOW(LED);
-			if(ldr_state_machine()){
-				//Pulse ocurred
-				pulse_counter = 1;
-				main_state = MAIN_COUNTING;
-				main_timer = secs_counter_read();
-			}
-			break;
-		case MAIN_COUNTING:
-			elapsed = secs_counter_read() - main_timer;
-			if(elapsed>PGM_MODE_ACTIVATION_MAX_TIME){
-				main_state = MAIN_IDLE;
-			}
-			else{
-				if(ldr_state_machine()){
-					pulse_counter++;
-					if(pulse_counter>=PGM_MODE_PULSES){
-						HIGH(LED);
-						main_state = MAIN_PGM_MODE;
-						main_timer = secs_counter_read();
-						pulse_counter = 0;
-					}
-				}
-			}
-			break;
-		case MAIN_PGM_MODE:
-			elapsed = secs_counter_read() - main_timer;
-			if(elapsed>PGM_MODE_MAX_TIME){
-				main_state = MAIN_IDLE;
-				if(pulse_counter>0){
-					//Save settings
-					for(char i=0; i<5;++i){
-						TOGGLE(LED);
-						_delay_ms(250);
-					}
-				}
-			}
-			if(ldr_state_machine()){
-				pulse_counter++;
-			}
-			break;
-		default:
-			main_state = MAIN_IDLE;
-			break;
-	}
-
-}
-*/
-
-
 static uint8_t mul10(uint8_t v)
 {
 	v = v << 1;
@@ -318,23 +246,24 @@ static uint8_t readConfiguration()
 		cfgByte = eeprom_read_byte((uint8_t*)1);
 	}
 	else{
-		cfgByte = 70;//The default mode is humidity with 70 %
+		cfgByte = 50;//The default mode is humidity with 50 %
 		//writeConfiguration(cfgByte);
 	}
 	return cfgByte;
 }
 
-/*
-static void delay_cycles(uint8_t cycles){
-	uint8_t ts = cycles_counter;
+
+static void delay_cycles(uint8_t cycles) {
+	uint8_t ts = zc_ticks;
 	uint8_t elapsed;
 	do {
-		elapsed = cycles_counter - ts;
-	} while(elapsed<cycles);
+		sleep_mode();
+		elapsed = zc_ticks - ts;
+	} while(elapsed < cycles);
 }
-*/
 
-static void delay_secs(uint8_t secs){
+
+static void delay_secs(uint8_t secs) {
 	uint8_t t0 = secs_counter_read();
 	uint8_t elapsed;
 	do {
@@ -342,10 +271,10 @@ static void delay_secs(uint8_t secs){
 	} while(elapsed<secs);
 }
 
-
 int main(void)
 {
 	menu_state_t menu_state = MENU_IDLE;
+	light_mode_state_t light_mode_state = LIGHT_MODE_STATE_OFF;
 	uint8_t pulse_counter = 0;//Used to count pulses to activate the configuration mode and counting pulses to set the mode
 	uint8_t main_timer; //used to measure time between humidity measures
 	uint8_t menu_timer = 0; //Used to measure time in seconds, for example in the configuration mode
@@ -353,63 +282,51 @@ int main(void)
 	 * A value above 100 means the unit works as a timer activated by light
 	 */
 	uint8_t cfg_mode;
-	light_mode_state_t light_mode_state = LIGHT_MODE_STATE_OFF;
 
 	cli();
-	subsec_counter = 0;
+
 	//cycles_counter = 0;
 	zc_ticks = 0;
+	subsec_counter = 0;
 
-	timer1_init();
-
-
-	//DDRB = _BV(LED_BIT) | _BV(OUT_BIT);
-	//PORTB = _BV(ZERO_IN_BIT) | _BV(OUT_BIT);
 	//Setup outputs
-
-	OUTPUT(LED);
+	DEBUG_LED_INIT();
 	OUTPUT(OUT1);
 	HIGH(OUT1);
-	//OUTPUT(AUX_OUT);
-
 
 	//Setup inputs
-	INPUT(ZERO_IN);
-	HIGH(ZERO_IN);
+	DIDR0 |= _BV(AIN1D); //Disable digital input buffer in the pin used to detect zero crossing
+	ADCSRB &= ~(_BV(ACME)); //Disable the ANA multiplexer
+	ACSR &= ~(_BV(ACD)); //Enable the analog comparator by clearing the disable bit
+	ACSR |= _BV(ACBG);  // Use the 1.1v bandgap reference as the positive input of the ANA
+	ACSR |= _BV(ACIE);  //Enable ANA Interrupt
 
 	GIFR = GIFR;          //Clear interrupt flags
-	GIMSK |= _BV(INT0);		//Enable INT0
-	MCUCR |= _BV(ISC01);    //INT0 in Falling edge
+
+	WDTCR |= _BV(WDTIE); // Enable watchdog timer interrupts. Using the minimum timeout 16ms
+	set_sleep_mode(SLEEP_MODE_IDLE);
 	sei();
 
-//	while(1){
-//		TOGGLE(OUT1);
-//		delay_cycles(MS_TO_CYCLES(100));
-//	}
-
-//	while(1){
-//		TOGGLE(OUT1);
-//		delay_secs(5);
-//	}
-	init_dht11();
+	timer1_init();
 	adc_init();
-/*
-	for(char i=0; i<5; ++i){
-		TOGGLE(LED);
-		delay_cycles(MS_TO_CYCLES(250));
-		//_delay_ms(250);
-	}
-	LOW(LED);
-*/
-//	turnOn();
-//	while(1){
-//
-//	}
-	//cfg_mode = readConfiguration();
-	cfg_mode = 110;
+	init_dht11();
 
+	HIGH(LED);
+	sleep_mode();
+	LOW(LED);
+	sleep_mode();
+	HIGH(LED);
+	sleep_mode();
+	LOW(LED);
+
+	//clock_prescale_set(clock_div_16);  //slow down to 500kHz
+
+	cfg_mode = readConfiguration();
+	//cfg_mode = 110;
+	//cfg_mode = 80;
 	main_timer = secs_counter_read();
 	while(1){
+		sleep_mode();
 		uint8_t elapsed;
 		uint8_t now;
 		now = secs_counter_read();
@@ -418,11 +335,11 @@ int main(void)
 		if(menu_state == MENU_IDLE){
 			if(cfg_mode <= 100){//Humidity mode
 				elapsed = now - main_timer;
-				if(elapsed > HUMIDITY_READ_PERIOD){
-					int8_t aux = read_humidity();
-					if(aux>0){
+				if(elapsed > HUMIDITY_READ_PERIOD) {
+					int8_t humidity = read_humidity();
+					if(humidity > 0){
 						//Successful read
-						if(aux >= cfg_mode){
+						if(humidity >= cfg_mode){
 							turnOn();
 						}
 						else{
@@ -465,14 +382,14 @@ int main(void)
 
 		switch (menu_state) {
 			case MENU_IDLE:
-				if(light_event==LIGHT_EVT_PULSE){
+				if(light_event == LIGHT_EVT_PULSE){
 					//Pulse ocurred
 					pulse_counter = 1;
 					menu_state = MENU_CFG_ACTIVATION;
 					menu_timer = now;
 				}
 				break;
-			case MENU_CFG_ACTIVATION:
+			case MENU_CFG_ACTIVATION://In this state we count the number of light pulses until we get at least CFG_MODE_PULSES or timeout occurs
 				elapsed = now - menu_timer;
 				if(elapsed > CFG_MODE_ACTIVATION_MAX_TIME){
 					menu_state = MENU_IDLE;
@@ -482,10 +399,11 @@ int main(void)
 					if(light_event == LIGHT_EVT_PULSE){
 						menu_timer = now;
 						pulse_counter++;
-						if(pulse_counter>=CFG_MODE_PULSES){
+						if(pulse_counter >= CFG_MODE_PULSES){
 							DEBUG_LED_ON();
 							menu_state = MENU_CFG_MODE;
 							pulse_counter = 0;
+							turnOff();
 						}
 					}
 				}
@@ -496,12 +414,20 @@ int main(void)
 					menu_state = MENU_IDLE;
 					if(pulse_counter>0){
 						cfg_mode = mul10(pulse_counter);
+						DEBUG_LED_OFF();
+						while(pulse_counter>0){
+							DEBUG_LED_ON();
+							_delay_ms(500);
+							DEBUG_LED_OFF();
+							_delay_ms(500);
+							pulse_counter--;
+						}
 						//Save settings
 						writeConfiguration(cfg_mode);
-						DEBUG_LED_OFF();
+
 					}
 				}
-				if(light_event==LIGHT_EVT_PULSE){
+				if(light_event == LIGHT_EVT_PULSE){
 					menu_timer = now;
 					pulse_counter++;
 				}
@@ -511,65 +437,60 @@ int main(void)
 				break;
 		}
 	}
+//
+//	triac_on = 1;
+//	while(1){
+///*
+//		if(ldr_read()){
+//			powerOn = 1;
+//		}
+//		else{
+//			powerOn = 0;
+//		}
+//		*/
+//		delay_cycles(10);
+//		HIGH(LED);
+//		delay_cycles(10);
+//		LOW(LED);
+//		/*
+//		_delay_ms(250);
+//		HIGH(LED);
+//		_delay_ms(250);
+//		LOW(LED);
+//		*/
+//		/*
+//		sleep_mode(); // light up LED for 0.25 seconds to indicate initialization
+//		HIGH(LED);
+//		sleep_mode(); // light up LED for 0.25 seconds to indicate initialization
+//		LOW(LED);
+//		*/
+//	}
+
 }
 
-ISR(INT0_vect)
-{
-	//Ignore spurious interrupts
-	if(zc_ticks>1 && zc_ticks<25){
-		return;
-	}
+ISR(ANA_COMP_vect) {
+	++zc_ticks;
 
-	//cycles_counter++;
 	subsec_counter++;
-	if(subsec_counter == 50){
+	if(subsec_counter == 100){
 		subsec_counter = 0;
-		secs_counter++;
+		++secs_counter;
 	}
 
-	//TOGGLE(LED);
-	switch(state){
-	case State_PowerOn:
-		fire_triac = TRIAC_PULSES;
-		break;
-	case State_Calibration:
-		if(zc_ticks>75 && zc_ticks<110){
-			state = State_PowerOn;
-			zc_interval = (zc_ticks>>1);
-		}
-		break;
-	default:
-		break;
+	if(triac_on){
+		triac_edges = TRIAC_PULSES;
+		timer1_start();
 	}
-	zc_ticks = 1;
-	timer1_start();
 }
+
+EMPTY_INTERRUPT(WDT_vect)
 
 ISR(TIM0_COMPA_vect) {
-
-//	if(zc_ticks>110){
-//		return;
-//	}
-	zc_ticks++;
-
-	if(state == State_PowerOn){
-
-		if(zc_ticks == zc_interval){
-			fire_triac = TRIAC_PULSES;
-		}
-
-		if(fire_triac){
-			fire_triac--;
-			if(fire_triac & 0x1){
-				LOW(OUT1);
-			}
-			else{
-				HIGH(OUT1);
-			}
-		}
+	--triac_edges;
+	FAST_TOGGLE(OUT1);
+	if(triac_edges == 0){
+		timer1_stop();
+		HIGH(OUT1);
 	}
+
 }
-
-
-
-
