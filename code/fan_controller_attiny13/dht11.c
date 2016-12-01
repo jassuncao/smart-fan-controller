@@ -107,15 +107,18 @@ int8_t read_humidity(void)
 	  uint8_t aux = 0;
 	  for(uint8_t bit = 0; bit < 8; bit++) {
 	  		int8_t b = read_bit();
-	  		if(b<0){
+	  		if(b < 0){
 	  			return bad_bit_data_pause; // invalid data pulse
 	  		}
+	  		/*jassuncao: The original method (below) of reassembling the bytes used more code space
+	  		 * due to branching and memory access.
+	  		 */
 	  		aux = aux << 1;
 	  		aux |= b & 0x01;
 	  	}
-	    raw.bytes[byte] = aux;
+	  raw.bytes[byte] = aux;
 	  /*
-	for(int8_t bit = 7; bit >= 0; bit--) {
+	  for(int8_t bit = 7; bit >= 0; bit--) {
 		int8_t b = read_bit();
 		if(b<0){
 			return bad_bit_data_pause; // invalid data pulse

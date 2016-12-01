@@ -14,6 +14,18 @@
 #include "macro_helpers.h"
 #include "dht11.h"
 
+//If the light is kept on less than LDR_PULSE_MAX_TIME (seconds) we consider it a pulse
+#define LDR_PULSE_MAX_TIME 5
+//We enter CFG mode when the light switches CFG_MODE_PULSES times in less than CFG_MODE_ACTIVATION_MAX_TIME
+#define CFG_MODE_PULSES 5
+#define CFG_MODE_ACTIVATION_MAX_TIME 10
+//After CFG_MODE_MAX_TIME seconds without light pulses we leave configuration mode
+#define CFG_MODE_MAX_TIME 5
+
+#define HUMIDITY_READ_PERIOD 30
+//In light mode, we only turn the fan ON if the light is kept on for at least LIGHT_DEBOUNCE_PERIOD seconds. Max value: 255 seconds
+#define LIGHT_DEBOUNCE_PERIOD 240
+
 #define OUT1 B,0
 #define ZERO_IN B,1
 #define LED B,3
@@ -59,10 +71,6 @@ typedef enum  {
  */
 register uint8_t subsec_counter asm("r2");
 
-/*
- * Incremented when zero crossing and used to implement delays
- */
-//static volatile uint8_t cycles_counter;
 
 /*
  * Incremented when the timer compare A interrupt occurs.
@@ -79,30 +87,28 @@ register uint8_t triac_edges asm("r5");
 
 static volatile uint8_t triac_on = 0;
 
-//If the light is kept on less than LDR_PULSE_MAX_TIME (seconds) we consider it a pulse
-#define LDR_PULSE_MAX_TIME 5
-//We enter CFG mode when the light switches CFG_MODE_PULSES times in less than CFG_MODE_ACTIVATION_MAX_TIME
-#define CFG_MODE_PULSES 5
-#define CFG_MODE_ACTIVATION_MAX_TIME 10
-
-#define CFG_MODE_MAX_TIME 10
-
-#define HUMIDITY_READ_PERIOD 30
-//In light mode, we only turn the fan on if the light is kept on for at least LIGHT_DEBOUNCE_PERIOD seconds
-#define LIGHT_DEBOUNCE_PERIOD 15
-
 static light_state_t light_state = LIGHT_OFF;
 
+//Auxiliary "timer" used for detecting light transitions.
 static uint8_t light_timer = 0;
 
+
 void timer1_init(){
+	/*
+	 * The timer configuration assumes the main clock is running at 1.2MHz (9.6MHz / 8)
+	 */
 	TCCR0B = 0;
 	TCNT0  = 0;					// Initialize counter value to 0
 	TCCR0A = _BV(WGM01); 		// Turn on CTC mode
-	//TCCR0A |= _BV(COM0A0);		// Enable the Output compare A pin in toggle mode
-	OCR0A = 240;				// Set compare Match Register -> Will interrupt every 0.0002 with the prescaler set to 0
+	OCR0A = 240;				// Set compare Match Register -> Will interrupt every 0.0002s with the prescaler set to 0
 	TIMSK0 |= _BV(OCIE0A);		// Enable timer compare A interrupt
 	TIFR0  |= _BV(OCF0A);		// Clear the output compare A flag
+
+	/* The next lines were from an attempt to use the timer toggle mode to trigger the TRIAC.
+	 * It didn't work and I didn't spend much time analyzing the reason.
+	 * My guess is the OCA would end with the wrong bit state when the pulse train finished
+	 */
+	//TCCR0A |= _BV(COM0A0);	// Enable the Output compare A pin in toggle mode
 	//TCCR0B |= _BV(FOC0A);		// Force output compare A ensuring the output pin is in high state (the triac is active low)
 }
 
@@ -209,6 +215,7 @@ static light_event_t light_state_machine(const uint8_t now)
 			}
 		}
 		else{
+			//FIXME: We should check for a minimum time ON.
 			//We got a pulse
 			event = LIGHT_EVT_PULSE;
 			light_state = LIGHT_OFF;
@@ -225,14 +232,24 @@ static light_event_t light_state_machine(const uint8_t now)
 	return event;
 }
 
+/**
+ * Including the generic multiplication routines would take too much space.
+ * Since we only need to multiply by 10 we can use a simpler multiplication routine
+ */
 static uint8_t mul10(uint8_t v)
 {
-	v = v << 1;
-	return v+v+v+v+v;
+	v = v << 1; // Multiply by 2
+	return v+v+v+v+v; //And sum five times
 }
+
 
 static void writeConfiguration(uint8_t cfgByte)
 {
+	/*
+	 * The configuration is made of two bytes: A "magic number" and the actual configuration byte.
+	 * The magical number tells us that a valid configuration exists.
+	 *
+	 */
 	eeprom_update_byte((uint8_t*)0, 0xAA);//Write magic number
 	eeprom_update_byte((uint8_t*)1, cfgByte);
 }
@@ -242,7 +259,7 @@ static uint8_t readConfiguration()
 	uint8_t magicNumber;
 	uint8_t cfgByte;
 	magicNumber = eeprom_read_byte((uint8_t*)0);//Read magic number
-	if(magicNumber==0xAA){
+	if(magicNumber == 0xAA){
 		cfgByte = eeprom_read_byte((uint8_t*)1);
 	}
 	else{
@@ -253,6 +270,9 @@ static uint8_t readConfiguration()
 }
 
 
+/*
+
+//Unused delay routines
 static void delay_cycles(uint8_t cycles) {
 	uint8_t ts = zc_ticks;
 	uint8_t elapsed;
@@ -263,6 +283,7 @@ static void delay_cycles(uint8_t cycles) {
 }
 
 
+
 static void delay_secs(uint8_t secs) {
 	uint8_t t0 = secs_counter_read();
 	uint8_t elapsed;
@@ -270,6 +291,7 @@ static void delay_secs(uint8_t secs) {
 		elapsed = secs_counter_read() - t0;
 	} while(elapsed<secs);
 }
+*/
 
 int main(void)
 {
@@ -285,7 +307,6 @@ int main(void)
 
 	cli();
 
-	//cycles_counter = 0;
 	zc_ticks = 0;
 	subsec_counter = 0;
 
@@ -311,6 +332,8 @@ int main(void)
 	adc_init();
 	init_dht11();
 
+	//Pulse the LED a few times to give an indication it is running
+/*
 	HIGH(LED);
 	sleep_mode();
 	LOW(LED);
@@ -318,14 +341,13 @@ int main(void)
 	HIGH(LED);
 	sleep_mode();
 	LOW(LED);
-
+*/
 	//clock_prescale_set(clock_div_16);  //slow down to 500kHz
 
 	cfg_mode = readConfiguration();
-	//cfg_mode = 110;
-	//cfg_mode = 80;
 	main_timer = secs_counter_read();
 	while(1){
+
 		sleep_mode();
 		uint8_t elapsed;
 		uint8_t now;
@@ -333,7 +355,18 @@ int main(void)
 		light_event_t light_event = light_state_machine(now);
 
 		if(menu_state == MENU_IDLE){
-			if(cfg_mode <= 100){//Humidity mode
+			//Pulse the LED briefly every second
+			if(subsec_counter == 0){
+				HIGH(LED);
+			}
+			else if(subsec_counter == 10){
+				LOW(LED);
+			}
+
+			if(cfg_mode <= 100){
+				/*
+				 * Humidity mode
+				 */
 				elapsed = now - main_timer;
 				if(elapsed > HUMIDITY_READ_PERIOD) {
 					int8_t humidity = read_humidity();
@@ -349,7 +382,10 @@ int main(void)
 					main_timer = now;
 				}
 			}
-			else{//timer mode
+			else{
+				/*
+				 * timer mode
+				 */
 				switch(light_mode_state){
 					case LIGHT_MODE_STATE_DEBOUNCE:
 						if(light_event == LIGHT_EVT_OFF){
@@ -412,14 +448,14 @@ int main(void)
 				elapsed = now - menu_timer;
 				if(elapsed > CFG_MODE_MAX_TIME){
 					menu_state = MENU_IDLE;
-					if(pulse_counter>0){
+					if(pulse_counter > 0){
 						cfg_mode = mul10(pulse_counter);
 						DEBUG_LED_OFF();
 						while(pulse_counter>0){
+							_delay_ms(500);
 							DEBUG_LED_ON();
 							_delay_ms(500);
 							DEBUG_LED_OFF();
-							_delay_ms(500);
 							pulse_counter--;
 						}
 						//Save settings
