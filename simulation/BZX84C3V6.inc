@@ -1,0 +1,11 @@
+*SRC=BZX84C3V6;BZX84C3V6;Diodes;Zener <=10V; 3.60V  0.350W   Diodes Inc. 
+*SYM=HZEN
+.SUBCKT BZX84C3V6  1 2
+*        Terminals    A   K
+D1 1 2 DF
+DZ 3 1 DR
+VZ 2 3 1.12
+.MODEL DF D ( IS=40.1p RS=34.9 N=1.10
++ CJO=112p VJ=0.750 M=0.330 TT=50.1n )
+.MODEL DR D ( IS=8.01f RS=74.5 N=3.00 )
+.ENDS

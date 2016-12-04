@@ -1,0 +1,187 @@
+Cmp-Mod V01 Genere par PcbNew le Tue 12 Apr 2016 11:18:08 PM WEST
+
+BeginCmp
+TimeStamp = 569D70D2
+Path = /569D5F58
+Reference = C4;
+ValeurCmp = 100nF;
+IdModule  = w_capacitors:cnp_3mm_disc;
+EndCmp
+
+BeginCmp
+TimeStamp = 569D70DE
+Path = /569D59D5
+Reference = D2;
+ValeurCmp = 5V1 1/2W;
+IdModule  = w_pth_diodes:diode_do35;
+EndCmp
+
+BeginCmp
+TimeStamp = 569D70E4
+Path = /569D5A7D
+Reference = D3;
+ValeurCmp = 1N4007;
+IdModule  = w_pth_diodes:diode_do35;
+EndCmp
+
+BeginCmp
+TimeStamp = 569D70F0
+Path = /569D828A
+Reference = IC1;
+ValeurCmp = ATTINY13A-P;
+IdModule  = w_pth_circuits:dil_8-300_socket;
+EndCmp
+
+BeginCmp
+TimeStamp = 569D7111
+Path = /569D571A
+Reference = R1;
+ValeurCmp = 120R 2W;
+IdModule  = w_pth_resistors:R12x5.2;
+EndCmp
+
+BeginCmp
+TimeStamp = 569D7117
+Path = /569D909F
+Reference = R2;
+ValeurCmp = 510K;
+IdModule  = w_pth_resistors:RC03;
+EndCmp
+
+BeginCmp
+TimeStamp = 569D711D
+Path = /569D5AD6
+Reference = R3;
+ValeurCmp = 1M;
+IdModule  = w_pth_resistors:RC03;
+EndCmp
+
+BeginCmp
+TimeStamp = 569D7123
+Path = /57015728
+Reference = R4;
+ValeurCmp = 330R;
+IdModule  = w_pth_resistors:RC03;
+EndCmp
+
+BeginCmp
+TimeStamp = 569D7129
+Path = /570190B9
+Reference = R5;
+ValeurCmp = 330R;
+IdModule  = w_pth_resistors:RC03;
+EndCmp
+
+BeginCmp
+TimeStamp = 569D7135
+Path = /569DB6D2
+Reference = R7;
+ValeurCmp = 10K;
+IdModule  = w_pth_resistors:RC03;
+EndCmp
+
+BeginCmp
+TimeStamp = 569D710B
+Path = /57015230
+Reference = Q1;
+ValeurCmp = BTA204-800E;
+IdModule  = w_to:to220;
+EndCmp
+
+BeginCmp
+TimeStamp = 56A2AC9A
+Path = /569D585D
+Reference = C1;
+ValeurCmp = 1u 600V;
+IdModule  = w_capacitors:cnp_18x8mm;
+EndCmp
+
+BeginCmp
+TimeStamp = 56A2AC9F
+Path = /56A2AA50
+Reference = P1;
+ValeurCmp = Mains;
+IdModule  = w_conn_screw:mors_2p;
+EndCmp
+
+BeginCmp
+TimeStamp = 56A2ACA4
+Path = /56A2AB51
+Reference = P2;
+ValeurCmp = Motor;
+IdModule  = w_conn_screw:mors_2p;
+EndCmp
+
+BeginCmp
+TimeStamp = 56A2ACB6
+Path = /56A29049
+Reference = U1;
+ValeurCmp = DHT11;
+IdModule  = w_pin_strip:pin_strip_4;
+EndCmp
+
+BeginCmp
+TimeStamp = 56A2ADB3
+Path = /56A2B61A
+Reference = R8;
+ValeurCmp = 10K;
+IdModule  = w_pth_resistors:RC03;
+EndCmp
+
+BeginCmp
+TimeStamp = 56A6A0A9
+Path = /56A6AFF6
+Reference = C5;
+ValeurCmp = 100pF;
+IdModule  = w_capacitors:cnp_3mm_disc;
+EndCmp
+
+BeginCmp
+TimeStamp = 56A6A0AF
+Path = /56A6A90C
+Reference = R9;
+ValeurCmp = 510K;
+IdModule  = w_pth_resistors:RC03;
+EndCmp
+
+BeginCmp
+TimeStamp = 57015DEE
+Path = /5701924E
+Reference = D1;
+ValeurCmp = LED;
+IdModule  = w_indicators:led_3mm_red;
+EndCmp
+
+BeginCmp
+TimeStamp = 5701633B
+Path = /569D5B55
+Reference = C2;
+ValeurCmp = 220uF;
+IdModule  = w_capacitors:CP_8x11.5mm;
+EndCmp
+
+BeginCmp
+TimeStamp = 57016341
+Path = /569D5C04
+Reference = C3;
+ValeurCmp = 220uF;
+IdModule  = w_capacitors:CP_8x11.5mm;
+EndCmp
+
+BeginCmp
+TimeStamp = 57015DF4
+Path = /570194CF
+Reference = R10;
+ValeurCmp = 20k;
+IdModule  = w_pth_resistors:rc03_vert;
+EndCmp
+
+BeginCmp
+TimeStamp = 569D712F
+Path = /569DB1C0
+Reference = R6;
+ValeurCmp = LDR;
+IdModule  = w_pth_resistors:RC03;
+EndCmp
+
+EndListe
