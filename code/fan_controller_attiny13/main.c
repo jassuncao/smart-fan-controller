@@ -76,7 +76,7 @@ register uint8_t subsec_counter asm("r2");
  * Incremented when the timer compare A interrupt occurs.
  * Used to measure the number of timer ticks between zero crossings (one full cycle)
  */
-register uint8_t zc_ticks asm("r4");
+//register uint8_t zc_ticks asm("r4");
 //static volatile uint8_t zc_ticks = 0;
 
 //Incremented every second
@@ -146,7 +146,7 @@ static uint8_t adc_read(void)
 static inline uint8_t ldr_read()
 {
 	uint8_t ldr = adc_read();
-	return ldr < 200;
+	return ldr < 150;
 }
 
 
@@ -300,6 +300,7 @@ int main(void)
 	uint8_t pulse_counter = 0;//Used to count pulses to activate the configuration mode and counting pulses to set the mode
 	uint8_t main_timer; //used to measure time between humidity measures
 	uint8_t menu_timer = 0; //Used to measure time in seconds, for example in the configuration mode
+	uint8_t heartbeat_timer = 0; //Used for the heart beat LED pulse
 	/* keeps the coniguration mode where a value below 100 uses humidity as a trigger and the value is the humidity threshold.
 	 * A value above 100 means the unit works as a timer activated by light
 	 */
@@ -307,7 +308,7 @@ int main(void)
 
 	cli();
 
-	zc_ticks = 0;
+//	zc_ticks = 0;
 	subsec_counter = 0;
 
 	//Setup outputs
@@ -333,34 +334,35 @@ int main(void)
 	init_dht11();
 
 	//Pulse the LED a few times to give an indication it is running
-/*
-	HIGH(LED);
-	sleep_mode();
-	LOW(LED);
-	sleep_mode();
-	HIGH(LED);
-	sleep_mode();
-	LOW(LED);
-*/
+
+//	HIGH(LED);
+//	sleep_mode();
+//	LOW(LED);
+//	sleep_mode();
+//	HIGH(LED);
+//	sleep_mode();
+//	LOW(LED);
+
 	//clock_prescale_set(clock_div_16);  //slow down to 500kHz
 
 	cfg_mode = readConfiguration();
 	main_timer = secs_counter_read();
 	while(1){
-
-		sleep_mode();
 		uint8_t elapsed;
 		uint8_t now;
+
+		sleep_mode();
 		now = secs_counter_read();
 		light_event_t light_event = light_state_machine(now);
 
 		if(menu_state == MENU_IDLE){
-			//Pulse the LED briefly every second
-			if(subsec_counter == 0){
+			//Pulse the LED briefly every 5 seconds
+			elapsed = now - heartbeat_timer;
+			if(elapsed >= 5){
 				HIGH(LED);
-			}
-			else if(subsec_counter == 10){
+				_delay_ms(5);
 				LOW(LED);
+				heartbeat_timer = now;
 			}
 
 			if(cfg_mode <= 100){
@@ -446,15 +448,15 @@ int main(void)
 				break;
 			case MENU_CFG_MODE:
 				elapsed = now - menu_timer;
-				if(elapsed > CFG_MODE_MAX_TIME){
+				if(elapsed > CFG_MODE_MAX_TIME || pulse_counter >= 11){
 					menu_state = MENU_IDLE;
 					if(pulse_counter > 0){
 						cfg_mode = mul10(pulse_counter);
 						DEBUG_LED_OFF();
 						while(pulse_counter>0){
-							_delay_ms(500);
+							_delay_ms(250);
 							DEBUG_LED_ON();
-							_delay_ms(500);
+							_delay_ms(250);
 							DEBUG_LED_OFF();
 							pulse_counter--;
 						}
@@ -462,8 +464,7 @@ int main(void)
 						writeConfiguration(cfg_mode);
 
 					}
-				}
-				if(light_event == LIGHT_EVT_PULSE){
+				} else if(light_event == LIGHT_EVT_PULSE){
 					menu_timer = now;
 					pulse_counter++;
 				}
@@ -473,6 +474,16 @@ int main(void)
 				break;
 		}
 	}
+
+//	while(1){
+//		sleep_mode();
+//		if(ldr_read()){
+//			HIGH(LED);
+//		}
+//		else{
+//			LOW(LED);
+//		}
+//	}
 //
 //	triac_on = 1;
 //	while(1){
@@ -505,9 +516,9 @@ int main(void)
 }
 
 ISR(ANA_COMP_vect) {
-	++zc_ticks;
+//	++zc_ticks;
 
-	subsec_counter++;
+	++subsec_counter;
 	if(subsec_counter == 100){
 		subsec_counter = 0;
 		++secs_counter;
